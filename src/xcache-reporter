@@ -46,16 +46,21 @@ CENTRAL_COLLECTORS = 'collector1.opensciencegrid.org:9619,collector2.openscience
 # StashCache version (set at build time)
 STASHCACHE_VERSION = '##VERSION##'
 
+CACHE_TYPES = ['public', 'auth']
+CACHE_PORT = {"public": '1094', "auth": '8443'}
+
+
 class StashCacheReporter(object):
     '''Collect XRootD stats, cache state for performance, and report to collector'''
     def __init__(self, cache_path='/stash', collectors=CENTRAL_COLLECTORS,
-                 cache_walk_interval=2*60*60, log_level=30):
+                 cache_walk_interval=2*60*60, log_level=30, cache_type="public"):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(log_level)
         self.cache_path = cache_path
-        self.state_file = self.get_state_filename(cache_path)
+        self.state_file = self.get_state_filename(cache_path, cache_type)
         self.collectors = collectors
         self.cache_walk_interval = cache_walk_interval
+        self.cache_type = cache_type
 
         manager = multiprocessing.Manager()
         self.state = manager.dict()
@@ -63,11 +68,11 @@ class StashCacheReporter(object):
         self.load_state()
 
     @staticmethod
-    def get_state_filename(cache_path):
+    def get_state_filename(cache_path, cache_type):
         '''Generate state filename for cache_path:
         - Replace non-alphanumeric characters in cache_path with dash
         - Prepend temporary directory'''
-        state_file = 'stashcache-reporter'
+        state_file = f'stashcache-reporter-{cache_type}'
         state_file += ''.join(c if c.isalnum() else '.' for c in cache_path)
         state_file += '.json'
         return os.path.join(tempfile.gettempdir(), state_file)
@@ -104,15 +109,15 @@ class StashCacheReporter(object):
 
     def walk_cache(self):
         '''Walk cache directory to collect stats and update state'''
-        xrootd_url = 'root://' + socket.getfqdn()
+        xrootd_url = f"root://{socket.getfqdn()}:{CACHE_PORT[self.cache_type]}"
 
-        self.logger.debug('Collecting cache stats from %s', self.cache_path)
+        self.logger.debug('Collecting cache stats from %s (%s)', self.cache_path, self.cache_type)
         start_time = time.time()
         cache_ad = xrootd_cache_stats.collect_cache_stats(xrootd_url, self.cache_path)
         cache_ad['STASHCACHE_DaemonVersion'] = STASHCACHE_VERSION
         end_time = time.time()
-        self.logger.info('Cache stat collection for %s took %.2f seconds', self.cache_path,
-                         end_time - start_time)
+        self.logger.info('Cache stat collection for %s (%s) took %.2f seconds', self.cache_path,
+                         self.cache_type, end_time - start_time)
 
         if cache_ad['ping_response_status'] == 'ok':
             self.logger.debug('XRootD server (%s) status: OK', xrootd_url)
@@ -175,7 +180,7 @@ def main():
 
     scr = StashCacheReporter(cache_path=args.cache_path, collectors=args.collectors,
                              cache_walk_interval=args.cache_walk_interval,
-                             log_level=log_level)
+                             log_level=log_level, cache_type=args.cache_type)
 
     # Periodically advertise stats while collector runs
     ad_reporter = multiprocessing.Process(target=scr.advertiser_loop)
@@ -215,6 +220,8 @@ def parse_args():
                         help='Increase log verbosity (repeatable)')
     parser.add_argument('--debug', dest="debug", default=False, action="store_true",
                         help='Enable htcondor debugging')
+    parser.add_argument('--cache-type', default='public', choices=CACHE_TYPES,
+                        help='Type of cache ("public" or "auth")')
     return parser.parse_args()
 
 if __name__ == '__main__':
